@@ -21,14 +21,13 @@
 #define TG_BOT_TOKEN ""
 #define TG_CHAT_ID ""
 
-#define IDLE_THRESHOLD_MS 5000   // 5 seconds
+#define IDLE_THRESHOLD_MS 30000  // 30 seconds
 #define JIGGLE_INTERVAL_MS 1000  // 1 second
-#define JIGGLE_PIXELS 1          // 1 pixel (invisible to eye)
+#define JIGGLE_PIXELS 10         // 10 pixels (safer for all systems)
 
 volatile sig_atomic_t keep_running = 1;
 
 void handle_signal(int sig) {
-    printf("\n[System] Stopping...\n");
     keep_running = 0;
 }
 
@@ -38,10 +37,7 @@ size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
 }
 
 void send_telegram(const char *msg) {
-    CURL *curl;
-    CURLcode res;
-
-    curl = curl_easy_init();
+    CURL *curl = curl_easy_init();
     if(curl) {
         char url[512];
         char post_data[512];
@@ -53,12 +49,7 @@ void send_telegram(const char *msg) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback); 
         
-        res = curl_easy_perform(curl);
-        if(res != CURLE_OK) {
-            fprintf(stderr, "[Bot] Error: %s\n", curl_easy_strerror(res));
-        } else {
-            printf("[Bot] Sent: %s\n", msg);
-        }
+        curl_easy_perform(curl);
         curl_easy_cleanup(curl);
     }
 }
@@ -91,14 +82,12 @@ int main() {
     // 1. Connect to X Server
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) {
-        fprintf(stderr, "[Error] Cannot open display. (Is X11 running?)\n");
         return 1;
     }
 
     // 2. SAFETY CHECK: Verify XScreenSaver extension exists
     int event_base, error_base;
     if (!XScreenSaverQueryExtension(dpy, &event_base, &error_base)) {
-        fprintf(stderr, "[Fatal] XScreenSaver Extension missing!\n");
         XCloseDisplay(dpy);
         return 1;
     }
@@ -106,7 +95,7 @@ int main() {
     curl_global_init(CURL_GLOBAL_ALL);
     srand(time(NULL));
 
-    printf("[System] Idle Master X11 Running.\n");
+
 
     while (keep_running) {
         unsigned long current_idle = get_idle_time(dpy);
@@ -114,20 +103,30 @@ int main() {
         if (current_idle >= IDLE_THRESHOLD_MS) {
             // --- IDLE STATE ---
             send_telegram("User_is_Idle");
-            printf("[System] Jiggle Active.\n");
+            time_t idle_start = time(NULL);
 
             while (keep_running) {
                 jiggle_mouse(dpy);
                 
-                // Sleep 1s
+                // Sleep 1 second
                 struct timespec ts = {1, 0};
                 nanosleep(&ts, NULL);
 
-                // Check for HUMAN return
-                // If idle is tiny (<500ms), user moved mouse naturally
-                if (get_idle_time(dpy) < 500) {
-                    printf("[System] User Returned!\n");
-                    send_telegram("User_Returned");
+                // FIXED: Detect REAL human activity vs our own jiggle
+                // After jiggling + sleeping 1000ms:
+                // - If idle >= 900ms: No real user activity, our jiggle was the only event
+                // - If idle < 900ms: A REAL human moved/typed during our 1s sleep!
+                unsigned long current_idle = get_idle_time(dpy);
+                if (current_idle < 900) {
+                    time_t idle_end = time(NULL);
+                    long long total_idle_seconds = (long long)(idle_end - idle_start);
+                    long long hours = total_idle_seconds / 3600;
+                    long long mins = (total_idle_seconds % 3600) / 60;
+                    long long secs = total_idle_seconds % 60;
+                    
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "User_Returned_(idle_%lldh_%lldm_%llds)", hours, mins, secs);
+                    send_telegram(msg);
                     break; 
                 }
             }
@@ -145,6 +144,6 @@ int main() {
 
     if (dpy) XCloseDisplay(dpy);
     curl_global_cleanup();
-    printf("[System] Exiting.\n");
+
     return 0;
 }
